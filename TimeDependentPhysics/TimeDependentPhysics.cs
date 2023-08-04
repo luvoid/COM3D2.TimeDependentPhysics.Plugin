@@ -46,7 +46,7 @@ namespace COM3D2.TimeDependentPhysics
 		// The name of this plugin.
 		public const string PLUGIN_NAME = "TimeDependentPhysics";
 		// The version of this plugin.
-		public const string PLUGIN_VERSION = "0.4";
+		public const string PLUGIN_VERSION = "0.5";
 	}
 }
 
@@ -67,25 +67,55 @@ namespace COM3D2.TimeDependentPhysics
 		private ManualLogSource _Logger => base.Logger;
 
 		// Config entry variable. You set your configs to this.
-		internal static ConfigEntry<float> MinimumFPS;
+		internal static ConfigEntry<bool> PluginEnabled;
+		internal static ConfigEntry<bool> PatchingEnabled;
+		internal static ConfigEntry<float> SimulateFps;
+		internal static ConfigEntry<float> MinimumFps;
 
 		private void Awake()
 		{
 			// Useful for engaging coroutines or accessing non-static variables. Completely optional though.
 			Instance = this;
 
-			// Binds the configuration. In other words it sets your ConfigEntry var to your config setup.
-			MinimumFPS = Config.Bind("Limits", "Minimum FPS", 30f, "The minimum frames per second for which time-correction will occur.");
+			PluginEnabled = Config.Bind("Plugin", "PluginEnabled", true, 
+				"When disabled, effectivly removes the effects of the plugin.");
 
-			// Installs the patches in the TimeDependentPhysics class.
-			Harmony.CreateAndPatchAll(typeof(TimeDependentPhysics));
+			PatchingEnabled = Config.Bind("Plugin", "PatchingEnabled", true, 
+				"When disabled, will not attempt to apply Harmony patches. (Disables plugin, requires restart)");
 
-			Logger.LogInfo("Patching Complete");
+			SimulateFps = Config.Bind("Simulation", "SimulateFps", 60f, new ConfigDescription(
+				"Simulate physics as if the game is always running at this framerate.",
+				new AcceptableValueRange<float>(10f, 120f)
+			));
+
+			MinimumFps = Config.Bind("Simulation", "MinimumFps", 30f, new ConfigDescription(
+				"The minimum frames per second for which time-correction will occur.",
+				new AcceptableValueRange<float>(10f, 120f)
+			));
+
+			if (PatchingEnabled.Value)
+			{
+				// Installs the patches in the TimeDependentPhysics class.
+				Harmony.CreateAndPatchAll(typeof(TimeDependentPhysics));
+
+				Logger.LogInfo("Patching Complete");
+			}
+			else
+			{
+				Logger.LogInfo("Skip Patching");
+			}
+			
 		}
+
+		private void Update()
+		{ }
 
 		[HarmonyTranspiler, HarmonyPatch(typeof(jiggleBone), nameof(jiggleBone.LateUpdateSelf))]
 		static IEnumerable<CodeInstruction> LateUpdateSelf_Transpiler(IEnumerable<CodeInstruction> instrs)
 		{
+			var method_LateUpdateSelf = AccessTools.Method(typeof(jiggleBone), nameof(jiggleBone.LateUpdateSelf));
+			var transpileException = new InvalidOperationException("Could not transpile jiggleBone.LateUpdateSelf");
+
 			var field_BlendValueON = AccessTools.DeclaredField(typeof(jiggleBone), nameof(jiggleBone.BlendValueON));
 			var smethod_GetTimeFactor = AccessTools.Method(typeof(TimeDependentPhysics), nameof(TimeDependentPhysics.GetTimeFactor));
 			var local_num5 = 21; // Not used until after the if block, so use this for now
@@ -101,7 +131,8 @@ namespace COM3D2.TimeDependentPhysics
 				new(OpCodes.Bge_Un )
 			};
 			transpileHead.MatchForward(useEnd: true, match_BlendIfCheck);
-			Logger.LogInfo($"match_BlendIfCheck @ {transpileHead.Pos} with {transpileHead.Opcode} {transpileHead.Operand}");
+			if (transpileHead.ReportFailure(method_LateUpdateSelf, Logger.LogError)) throw transpileException;
+			Logger.LogDebug($"match_BlendIfCheck @ {transpileHead.Pos} with {transpileHead.Opcode} {transpileHead.Operand}");
 			transpileHead.Advance(1);
 
 			CodeInstruction[] code_DeclareTimeFactor =
@@ -122,7 +153,7 @@ namespace COM3D2.TimeDependentPhysics
 			// this.vel.z += ??? * timeFactor;
 			CodeInstruction[] code_MulTimeFactor =
 			{
-				// float timeFactor = GetTimeFactor();
+				// * timeFactor;
 				new(OpCodes.Ldloc_S, local_num5),
 				new(OpCodes.Mul    ),
 			};
@@ -139,7 +170,8 @@ namespace COM3D2.TimeDependentPhysics
 					new(OpCodes.Stfld, floatField),
 				};
 				transpileHead.MatchForward(useEnd: false, match_AddToField);
-				Logger.LogInfo($"match_AddToField {floatField.Name} @ {transpileHead.Pos} with {transpileHead.Opcode} {transpileHead.Operand}");
+				if (transpileHead.ReportFailure(method_LateUpdateSelf, Logger.LogError)) throw transpileException;
+				Logger.LogDebug($"match_AddToField {floatField.Name} @ {transpileHead.Pos} with {transpileHead.Opcode} {transpileHead.Operand}");
 				transpileHead.Insert(code_MulTimeFactor);
 			}
 
@@ -172,7 +204,8 @@ namespace COM3D2.TimeDependentPhysics
 					new(OpCodes.Stfld, field_dynamicPos),
 				};
 				transpileHead.MatchForward(useEnd: false, match_AddToVector);
-				Logger.LogInfo($"match_AddToVector {vectorField.Name} += @ {transpileHead.Pos} with {transpileHead.Opcode} {transpileHead.Operand}");
+				if (transpileHead.ReportFailure(method_LateUpdateSelf, Logger.LogError)) throw transpileException;
+				Logger.LogDebug($"match_AddToVector {vectorField.Name} += @ {transpileHead.Pos} with {transpileHead.Opcode} {transpileHead.Operand}");
 				transpileHead.Advance(1); 
 				transpileHead.Insert(code_VMulTimeFactor);
 			}
@@ -183,11 +216,14 @@ namespace COM3D2.TimeDependentPhysics
 
 		static float GetTimeFactor()
 		{
-			// Don't extrapolate any further if deltaTime is greater than MinimumFPS's rate.
-			float maxDeltaTime = 1 / Mathf.Max(1, MinimumFPS.Value);
+			if (!PluginEnabled.Value) return 1;
 
-			// Calculate time factor relative to what the time would have been if it was running at 60 FPS
-			float timeFactor = Mathf.Min(maxDeltaTime, Time.deltaTime) / (1 / 60f);
+			// Don't extrapolate any further if deltaTime is greater than MinimumFPS's rate.
+			float maxDeltaTime = 1 / Mathf.Max(1, MinimumFps.Value);
+			float simulateFPS = Mathf.Max(1, SimulateFps.Value);
+
+			// Calculate time factor relative to what the time would have been if it was running at simulateFPS
+			float timeFactor = Mathf.Min(maxDeltaTime, Time.deltaTime) / (1 / simulateFPS);
 
 			return timeFactor;
 		}

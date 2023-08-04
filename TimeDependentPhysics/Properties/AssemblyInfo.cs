@@ -8,9 +8,9 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyTitle("TimeDependentPhysics")]
 [assembly: AssemblyDescription("")]
 [assembly: AssemblyConfiguration("")]
-[assembly: AssemblyCompany("")]
+[assembly: AssemblyCompany("https://github.com/luvoid/COM3D2.TimeDependentPhysics.Plugin")]
 [assembly: AssemblyProduct("TimeDependentPhysics")]
-[assembly: AssemblyCopyright("Copyright © 2022")]
+[assembly: AssemblyCopyright("Copyright © luvoid 2022")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("Neutral")]
 
