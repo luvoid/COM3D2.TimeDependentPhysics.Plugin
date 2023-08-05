@@ -396,3 +396,4 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+/TimeDependentPhysics/LateSelfUpdate_Override.cs
